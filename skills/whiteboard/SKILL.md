@@ -14,6 +14,22 @@ exposes the `window.h` debug handle this skill depends on.
 
 Override with `WHITEBOARD_PORT` / `EXCALIDRAW_REPO` if needed.
 
+## Always append
+
+**Every drawing is added to the board. You never replace or erase what is already
+on it.** The canvas is a shared board the user is watching and may have drawn on
+themselves; wiping it loses work that cannot be recovered.
+
+- `wb.draw()` appends, always. There is no replace mode — `{ append: false }`
+  throws.
+- New batches are placed **below** the existing content automatically
+  (`place: "below"`, the default), so author coordinates from wherever is
+  convenient and they land in free space.
+- `wb.clear()` and `wb.remove()` are the only ways to take something off the
+  board, and you call them **only when the user explicitly asks** ("clear the
+  whiteboard", "remove the cache box", "redraw that diagram"). A new drawing
+  request is never an instruction to erase the old one.
+
 ## Procedure
 
 **1. Ensure the server is up.** Idempotent: ~0.1s when already running, ~5–15s
@@ -55,7 +71,8 @@ The cache-busting `?t=` matters — without it an edited bootstrap won't reload.
 Page state dies on every reload, so **run this before each drawing** rather than
 assuming it stuck. It defines `window.wb`.
 
-**4. Draw** with `wb.draw([...])`:
+**4. Draw** with `wb.draw([...])` — one call for the whole diagram, appended
+below whatever is already there:
 
 ```js
 wb.draw([
@@ -67,8 +84,11 @@ wb.draw([
     roundness: { type: 3 }, label: { text: "API", fontSize: 18 } },
   { type: "arrow", x: 290, y: 145, width: 100, height: 0,
     start: { id: "client" }, end: { id: "api" }, label: { text: "HTTP", fontSize: 14 } },
-], { append: false })
+])
 ```
+
+It returns `{ added, total, offset }` — `offset` is how far the batch was pushed
+to clear the existing content.
 
 Read `reference.md` next to this file for the element format, styling, arrows,
 frames and a palette before composing anything beyond labelled boxes.
@@ -81,32 +101,40 @@ overlapping shapes or arrows that missed their anchors, and they asked to be
 
 | call | does |
 |---|---|
-| `wb.draw(skeletons, { append = true, fit = true })` | add elements; `append:false` replaces the canvas. Returns `{added, total}` |
+| `wb.draw(skeletons, { place = "below", fit = true })` | append elements. `place`: `"below"` \| `"right"` \| `null` (literal coordinates). Returns `{added, total, offset}` |
 | `wb.list()` | current elements as `{id, type, x, y, w, h, text}` — use before editing |
-| `wb.remove(ids)` | delete by id (also drops bound labels) |
-| `wb.clear()` | empty the canvas |
+| `wb.bounds()` | bounding box of the board, or `null` if empty |
+| `wb.remove(ids)` | delete by id (also drops bound labels) — **only on an explicit request** |
+| `wb.clear()` | empty the canvas — **only on an explicit request** |
 | `wb.zoomFit()` | zoom to fit (Shift+1) |
 | `wb.persist()` | force-save to localStorage (`draw` already does this) |
 
 **Draw each diagram in a single `draw()` call.** Arrow `start`/`end` ids resolve
 only against shapes listed in that same call; pointing at a box already on the
-canvas leaves the arrow silently unbound, so `draw()` throws if you try. To change
-a diagram, re-issue the whole thing with `append: false`.
+canvas leaves the arrow silently unbound, so `draw()` throws if you try.
 
 `draw()` keeps the ids you author, so `wb.remove("api")` works later. Drawing the
-same id twice logs `Duplicate id found` and drops that element.
+same id twice logs `Duplicate id found` and drops that element — so give each new
+diagram fresh ids (`auth-api`, not `api` again).
 
 ## Judgement
 
-- **Adding vs. replacing**: a fresh request ("show me X") means `append: false`.
-  Only append when the user is extending what is already there.
-- Before modifying an existing drawing, `wb.list()` to see what is really on the
-  canvas instead of guessing ids.
+- **A new request means a new drawing on the board**, placed below the last one.
+  Do not clear first, and do not ask whether to clear — just draw.
+- **Extending an existing diagram**: `wb.list()` first to see the real ids and
+  coordinates, then `draw(..., { place: null })` so your coordinates are taken
+  literally and the additions land inside that diagram. Remember the new arrows
+  cannot bind to shapes drawn in an earlier call — to rewire a diagram,
+  `wb.remove()` its ids and redraw the whole thing in one call.
+- **Redrawing after a mistake** (overlaps, wrong layout): `wb.remove()` the ids
+  you just added — yours, not the user's — then draw again.
+- `wb.clear()` only when the user asks for a blank board, in those words.
+- Use `wb.bounds()` if you want to know where your batch will land, or to title a
+  diagram above itself with `place: null`.
 - Lay out on a grid, ~60–80px between boxes. There is no auto-layout, so sloppy
   coordinates give overlapping arrows.
 - Drawings persist in localStorage across restarts, so the canvas may already hold
-  the user's own work. Prefer `append: false` over `wb.clear()`, and never clear
-  unprompted if `wb.list()` shows content you did not draw.
+  the user's own work from a previous session. Appending keeps it safe.
 
 ## When it breaks
 
