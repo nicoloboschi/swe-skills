@@ -1,0 +1,129 @@
+---
+name: whiteboard
+description: Draw diagrams on a local Excalidraw whiteboard in Chrome. Use whenever the user says "show me on the whiteboard", "draw this", "sketch this out", "put it on the whiteboard", or asks to visualize/diagram an architecture, flow, or design — and when they want an existing whiteboard drawing changed, extended, or cleared.
+---
+
+# Whiteboard (local Excalidraw)
+
+Draw on a real Excalidraw canvas running locally by pushing elements through the
+app's own API — not by dragging the mouse.
+
+The whiteboard lives at a **fixed URL: `http://localhost:3999`**. It runs from a
+clone of excalidraw at `~/dev/excalidraw`, as a **dev** build — that is what
+exposes the `window.h` debug handle this skill depends on.
+
+Override with `WHITEBOARD_PORT` / `EXCALIDRAW_REPO` if needed.
+
+## Procedure
+
+**1. Ensure the server is up.** Idempotent: ~0.1s when already running, ~5–15s
+when it has to start. Run it every time; never assume the server survived.
+
+```bash
+bash ~/.claude/skills/whiteboard/scripts/ensure-server.sh
+```
+
+(Adjust the path if this skill is installed elsewhere — it is `scripts/ensure-server.sh`
+inside the skill directory.)
+
+It prints:
+
+```
+url=http://localhost:3999
+repo=/Users/you/dev/excalidraw
+bootstrap=/@fs/Users/you/dev/excalidraw/.whiteboard-bootstrap.js
+```
+
+It also stages the bootstrap module inside the repo, because vite only serves
+files under its own root. On failure it explains why on stderr — read it and
+relay it rather than guessing.
+
+**2. Get a tab on `url`.** Call `tabs_context_mcp` first; reuse a tab already on
+`http://localhost:3999`, otherwise `tabs_create_mcp` + `navigate`. Keep the tab id
+and **do not close it** — the user is looking at it. If a later call says the tab
+no longer exists, re-run `tabs_context_mcp` and redo steps 2–3; the canvas is
+restored from localStorage, so nothing is lost.
+
+**3. Bootstrap the page** with `javascript_tool`, using the `bootstrap=` path:
+
+```js
+await import("/@fs/Users/you/dev/excalidraw/.whiteboard-bootstrap.js?t=" + Date.now());
+`ready (${wb.list().length} elements)`
+```
+
+The cache-busting `?t=` matters — without it an edited bootstrap won't reload.
+Page state dies on every reload, so **run this before each drawing** rather than
+assuming it stuck. It defines `window.wb`.
+
+**4. Draw** with `wb.draw([...])`:
+
+```js
+wb.draw([
+  { type: "rectangle", id: "client", x: 100, y: 100, width: 180, height: 90,
+    backgroundColor: "#a5d8ff", strokeColor: "#1971c2", fillStyle: "solid",
+    roundness: { type: 3 }, label: { text: "Client", fontSize: 18 } },
+  { type: "rectangle", id: "api", x: 400, y: 100, width: 180, height: 90,
+    backgroundColor: "#b2f2bb", strokeColor: "#2f9e44", fillStyle: "solid",
+    roundness: { type: 3 }, label: { text: "API", fontSize: 18 } },
+  { type: "arrow", x: 290, y: 145, width: 100, height: 0,
+    start: { id: "client" }, end: { id: "api" }, label: { text: "HTTP", fontSize: 14 } },
+], { append: false })
+```
+
+Read `reference.md` next to this file for the element format, styling, arrows,
+frames and a palette before composing anything beyond labelled boxes.
+
+**5. Screenshot the tab** and show the user. Always — it is how you catch
+overlapping shapes or arrows that missed their anchors, and they asked to be
+*shown* something.
+
+## API on the page
+
+| call | does |
+|---|---|
+| `wb.draw(skeletons, { append = true, fit = true })` | add elements; `append:false` replaces the canvas. Returns `{added, total}` |
+| `wb.list()` | current elements as `{id, type, x, y, w, h, text}` — use before editing |
+| `wb.remove(ids)` | delete by id (also drops bound labels) |
+| `wb.clear()` | empty the canvas |
+| `wb.zoomFit()` | zoom to fit (Shift+1) |
+| `wb.persist()` | force-save to localStorage (`draw` already does this) |
+
+**Draw each diagram in a single `draw()` call.** Arrow `start`/`end` ids resolve
+only against shapes listed in that same call; pointing at a box already on the
+canvas leaves the arrow silently unbound, so `draw()` throws if you try. To change
+a diagram, re-issue the whole thing with `append: false`.
+
+`draw()` keeps the ids you author, so `wb.remove("api")` works later. Drawing the
+same id twice logs `Duplicate id found` and drops that element.
+
+## Judgement
+
+- **Adding vs. replacing**: a fresh request ("show me X") means `append: false`.
+  Only append when the user is extending what is already there.
+- Before modifying an existing drawing, `wb.list()` to see what is really on the
+  canvas instead of guessing ids.
+- Lay out on a grid, ~60–80px between boxes. There is no auto-layout, so sloppy
+  coordinates give overlapping arrows.
+- Drawings persist in localStorage across restarts, so the canvas may already hold
+  the user's own work. Prefer `append: false` over `wb.clear()`, and never clear
+  unprompted if `wb.list()` shows content you did not draw.
+
+## When it breaks
+
+- `Port 3999 is in use by something that is not an Excalidraw dev server` — the
+  script refuses to start a second server somewhere unpredictable. Free the port,
+  or re-run with `WHITEBOARD_PORT=4001`.
+- `window.h is missing` — the tab is not on the dev server (a real excalidraw.com
+  tab, or a stale URL). Re-run step 1 and navigate to the `url` it prints.
+- `Failed to fetch dynamically imported module`, or the page errors mid-session —
+  the dev server died. Re-run step 1, re-navigate, re-bootstrap.
+- Drawing vanishes after reload — `wb.persist()`. The app skips its own
+  localStorage save while `document.hidden`, which an automated tab usually is;
+  `draw()` compensates, so this only bites if you call `updateScene` directly.
+- Elements silently missing — check the console for `Duplicate id found`.
+
+## Editing this skill
+
+`scripts/bootstrap.js` is the source of truth; `ensure-server.sh` copies it to
+`<repo>/.whiteboard-bootstrap.js` (git-excluded) on every run. Edit it here, then
+re-run step 1.
